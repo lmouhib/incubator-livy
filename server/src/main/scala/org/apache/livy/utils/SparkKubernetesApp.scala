@@ -193,7 +193,6 @@ class SparkKubernetesApp private[utils](
 
           val latestAppInfo = AppInfo(
             appReport.getDriverLogUrl,
-            appReport.getTrackingUrl,
             appReport.getExecutorsLogUrls
           )
           if (appInfo != latestAppInfo) {
@@ -326,7 +325,6 @@ private[utils] case class KubernetesAppReport(
     driver: Option[Pod],
     executors: Seq[Pod],
     appLog: IndexedSeq[String],
-    ingress: Option[Ingress],
     livyConf: LivyConf) {
 
   import KubernetesConstants._
@@ -380,15 +378,6 @@ private[utils] case class KubernetesAppReport(
       if (urls.nonEmpty) return Some(urls.mkString(";"))
     }
     None
-  }
-
-  def getTrackingUrl: Option[String] = {
-    val host = ingress.flatMap(i => Try(i.getSpec.getRules.get(0).getHost).toOption)
-    val path = driver
-      .map(_.getMetadata.getLabels.getOrDefault(SPARK_APP_TAG_LABEL, "unknown"))
-    val protocol = livyConf.get(LivyConf.KUBERNETES_INGRESS_PROTOCOL)
-    if (host.isDefined && path.isDefined) Some(s"$protocol://${host.get}/${path.get}")
-    else None
   }
 
   def getApplicationDiagnostics: IndexedSeq[String] = {
@@ -484,8 +473,8 @@ private[utils] class LivyKubernetesClient(
     val driver = pods.find(isDriver)
     val executors = pods.filter(isExecutor)
     val appLog = getApplicationLog(app, cacheLogSize)
-    val ingress = getIngress(app)
-    KubernetesAppReport(driver, executors, appLog, ingress, livyConf)
+    //val ingress = getIngress(app)
+    KubernetesAppReport(driver, executors, appLog, livyConf)
   }
 
   private def getApplicationLog(
@@ -495,12 +484,6 @@ private[utils] class LivyKubernetesClient(
         .withName(app.getApplicationPod.getMetadata.getName)
         .tailingLines(cacheLogSize).getLog.split("\n").toIndexedSeq
     ).getOrElse(IndexedSeq.empty)
-  }
-
-  private def getIngress(app: KubernetesApplication): Option[Ingress] = {
-    client.extensions.ingresses.inNamespace(app.getApplicationNamespace)
-      .withLabel(SPARK_APP_TAG_LABEL, app.getApplicationTag)
-      .list.getItems.asScala.headOption
   }
 
   private def isDriver: Pod => Boolean = {
