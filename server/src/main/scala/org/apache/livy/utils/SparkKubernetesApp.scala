@@ -180,10 +180,6 @@ class SparkKubernetesApp private[utils](
         Thread.currentThread().setName(s"kubernetesAppMonitorThread-$appTag")
         listener.foreach(_.appIdKnown(appId))
 
-        if (livyConf.getBoolean(LivyConf.KUBERNETES_INGRESS_CREATE)) {
-          withRetry(kubernetesClient.createSparkUIIngress(app, livyConf))
-        }
-
         var appInfo = AppInfo()
         while (isRunning) {
           val appReport = withRetry(kubernetesClient.getApplicationReport(app, cacheLogSize))
@@ -496,100 +492,8 @@ private[utils] class LivyKubernetesClient(
 
   def getDefaultNamespace: String = client.getNamespace
 
-  def createSparkUIIngress(app: KubernetesApplication, livyConf: LivyConf): Unit = {
-    val sparkUIService = buildSparkUIService(app)
-
-    val annotationsString = livyConf.get(LivyConf.KUBERNETES_INGRESS_ADDITIONAL_ANNOTATIONS)
-    var annotations: Seq[(String, String)] = Seq.empty
-    if (annotationsString != null && annotationsString.trim.nonEmpty) {
-      annotations = annotationsString
-        .split(";").map(_.split("="))
-        .map(array => array.head -> array.tail.mkString("=")).toSeq
-    }
-
-    val sparkUIIngress = buildSparkUIIngress(
-      app,
-      livyConf.get(LivyConf.KUBERNETES_INGRESS_PROTOCOL),
-      livyConf.get(LivyConf.KUBERNETES_INGRESS_HOST),
-      sparkUIService,
-      livyConf.get(LivyConf.KUBERNETES_INGRESS_TLS_SECRET_NAME),
-      livyConf.get(LivyConf.KUBERNETES_INGRESS_ADDITIONAL_CONF_SNIPPET),
-      annotations: _*
-    )
-    val resources: Seq[HasMetadata] = Seq(sparkUIService, sparkUIIngress)
-    addOwnerReference(app.getApplicationPod, resources: _*)
-    client.resourceList(resources.asJava).createOrReplace()
-  }
-
-  private def buildSparkUIIngress(
-      app: KubernetesApplication, protocol: String, host: String, service: Service,
-      tlsSecretName: String, additionalConfSnippet: String, additionalAnnotations: (String, String)*
-  ): Ingress = {
-    val appTag = app.getApplicationTag
-
-    val annotations = Map(
-      "kubernetes.io/ingress.class" -> "nginx",
-      "nginx.ingress.kubernetes.io/rewrite-target" -> "/$1",
-      "nginx.ingress.kubernetes.io/proxy-redirect-from" -> s"http://$$host/",
-      "nginx.ingress.kubernetes.io/proxy-redirect-to" -> s"/$appTag/",
-      "nginx.ingress.kubernetes.io/configuration-snippet" ->
-        NGINX_CONFIG_SNIPPET.concat(additionalConfSnippet).format(appTag, appTag, appTag)
-    ) ++ additionalAnnotations
-
-    val builder = new IngressBuilder()
-      .withApiVersion("networking.k8s.io/v1")
-      .withNewMetadata()
-      .withName(fixResourceName(s"${app.getApplicationPod.getMetadata.getName}-ui"))
-      .withNamespace(app.getApplicationNamespace)
-      .addToAnnotations(annotations.asJava)
-      .addToLabels(SPARK_APP_TAG_LABEL, appTag)
-      .addToLabels(CREATED_BY_LIVY_LABEL.asJava)
-      .endMetadata()
-      .withNewSpec()
-      .addNewRule()
-      .withHost(host)
-      .withNewHttp()
-      .addNewPath()
-      .withPath(s"/$appTag/?(.*)")
-      .withNewBackend()
-      .withServiceName(service.getMetadata.getName)
-      .withNewServicePort(service.getSpec.getPorts.get(0).getName)
-      .endBackend()
-      .endPath()
-      .endHttp()
-      .endRule()
-    if (protocol.endsWith("s") && tlsSecretName != null && tlsSecretName.nonEmpty) {
-      builder.addNewTl().withSecretName(tlsSecretName).addToHosts(host).endTl()
-    }
-    builder.endSpec().build()
-  }
-
   private def fixResourceName(name: String): String = {
     StringUtils.stripEnd(StringUtils.left(name, 63), "-").toLowerCase
-  }
-
-  private def buildSparkUIService(
-  app: KubernetesApplication,
-      portName: String = "spark-ui",
-      port: Int = 4040
-  ): Service = {
-    new ServiceBuilder()
-      .withNewMetadata()
-      .withName(fixResourceName(s"${app.getApplicationPod.getMetadata.getName}-ui"))
-      .withNamespace(app.getApplicationNamespace)
-      .addToLabels(SPARK_APP_TAG_LABEL, app.getApplicationTag)
-      .addToLabels(CREATED_BY_LIVY_LABEL.asJava)
-      .endMetadata()
-      .withNewSpec()
-      .withClusterIP("None")
-      .addToSelector(SPARK_APP_TAG_LABEL, app.getApplicationTag)
-      .addToSelector(SPARK_ROLE_LABEL, SPARK_ROLE_DRIVER)
-      .addNewPort()
-      .withName(portName)
-      .withPort(port)
-      .endPort()
-      .endSpec()
-      .build()
   }
 
   // Add a OwnerReference to the given resources making the driver pod an owner of them so when
